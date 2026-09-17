@@ -1,0 +1,256 @@
+openapi: 3.0.3
+info:
+  title: Counters API
+  version: 1.0.0
+  description: |
+    CRUD over a collection of named integer counters (`Dictionary<String, Int>`), persisted in
+    PostgreSQL. `POST /counters` and `POST /counters/{name}/increment` are protected by a
+    client-supplied `Idempotency-Key` header (UUID): a retried request with the same key
+    replays the original response instead of executing again.
+
+    All error responses share one body shape: `{"error": "<message>"}`.
+servers:
+  - url: https://localhost:8443
+    description: Local development (self-signed certificate)
+tags:
+  - name: counters
+
+paths:
+  /counters:
+    get:
+      tags: [counters]
+      summary: List all counters
+      operationId: listCounters
+      responses:
+        '200':
+          description: All live counters (soft-deleted ones are excluded)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Counter'
+              example:
+                - { name: page-views, value: 42 }
+                - { name: signups, value: 7 }
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [counters]
+      summary: Create a counter
+      description: |
+        Creates a counter with the given name and initial value. Not naturally idempotent,
+        so the `Idempotency-Key` header is required. A name that was soft-deleted earlier can
+        be created again and starts fresh from `initialValue`.
+      operationId: createCounter
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateCounterRequest'
+            example: { name: page-views, initialValue: 0 }
+      responses:
+        '201':
+          description: Counter created (also returned on replay of a successful create)
+          headers:
+            Location:
+              description: URL of the created counter
+              schema: { type: string, example: /counters/page-views }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Counter'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          description: |
+            Either a live counter with this name already exists, or a request with the same
+            `Idempotency-Key` is still being processed (retry shortly).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                nameExists:
+                  value: { error: "counter 'page-views' already exists" }
+                keyInFlight:
+                  value: { error: "a request with this Idempotency-Key is still processing" }
+        '422':
+          $ref: '#/components/responses/IdempotencyKeyReused'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /counters/{name}:
+    parameters:
+      - $ref: '#/components/parameters/CounterName'
+    get:
+      tags: [counters]
+      summary: Get a counter by name
+      operationId: getCounter
+      responses:
+        '200':
+          description: The counter
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Counter'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      tags: [counters]
+      summary: Delete a counter
+      description: |
+        Soft-deletes the counter: it disappears from the API but the row is kept. Idempotent
+        in effect — a repeated call finds nothing to delete and returns 404.
+      operationId: deleteCounter
+      responses:
+        '204':
+          description: Counter deleted
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /counters/{name}/increment:
+    parameters:
+      - $ref: '#/components/parameters/CounterName'
+    post:
+      tags: [counters]
+      summary: Increment a counter by one
+      description: |
+        Atomically increments the counter (`UPDATE ... SET value = value + 1 ... RETURNING`)
+        and returns the new value. Concurrent increments never lose updates and each caller
+        receives a distinct value. Not idempotent by nature, so the `Idempotency-Key` header
+        is required; a retry with the same key replays the original result.
+      operationId: incrementCounter
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: The counter with its new value
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Counter'
+              example: { name: page-views, value: 43 }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: |
+            Either the counter has reached `Int.MAX_VALUE` and cannot be incremented, or a
+            request with the same `Idempotency-Key` is still being processed (retry shortly).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                overflow:
+                  value: { error: "counter 'page-views' has reached the maximum value 2147483647" }
+                keyInFlight:
+                  value: { error: "a request with this Idempotency-Key is still processing" }
+        '422':
+          $ref: '#/components/responses/IdempotencyKeyReused'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+components:
+  parameters:
+    CounterName:
+      name: name
+      in: path
+      required: true
+      description: Counter name
+      schema:
+        $ref: '#/components/schemas/CounterName'
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: |
+        Client-generated UUID identifying this operation. Reuse the same value when retrying
+        the same request; use a fresh value for each new operation.
+      schema:
+        type: string
+        format: uuid
+        example: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+
+  schemas:
+    CounterName:
+      type: string
+      minLength: 1
+      maxLength: 255
+      pattern: '^[A-Za-z0-9_.-]+$'
+      example: page-views
+    Counter:
+      type: object
+      required: [name, value]
+      properties:
+        name:
+          $ref: '#/components/schemas/CounterName'
+        value:
+          type: integer
+          format: int32
+          example: 42
+    CreateCounterRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          $ref: '#/components/schemas/CounterName'
+        initialValue:
+          type: integer
+          format: int32
+          default: 0
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          example: counter 'page-views' not found
+
+  responses:
+    BadRequest:
+      description: |
+        Malformed or non-deserializable JSON body, invalid `name` in the body or the path (must
+        match `^[A-Za-z0-9_.-]{1,255}$`), or missing / non-UUID `Idempotency-Key` header.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example: { error: "missing or invalid Idempotency-Key header (expected a UUID)" }
+    NotFound:
+      description: No live counter with this name
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example: { error: "counter 'page-views' not found" }
+    IdempotencyKeyReused:
+      description: |
+        This `Idempotency-Key` was already used for a different request (another counter
+        name, or the other operation — a create key on increment or vice versa). Per the IETF
+        Idempotency-Key Header Field draft. Use a new key.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example: { error: "this Idempotency-Key was already used with a different request" }
+    InternalError:
+      description: Unexpected server error (also replayed if the original attempt with this key failed)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example: { error: "internal error" }
