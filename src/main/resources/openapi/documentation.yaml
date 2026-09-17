@@ -248,7 +248,9 @@ components:
             $ref: '#/components/schemas/ErrorResponse'
           example: { error: "this Idempotency-Key was already used with a different request" }
     InternalError:
-      description: Unexpected server error (also replayed if the original attempt with this key failed)
+      description: |
+        Unexpected server error. Nothing was applied and the `Idempotency-Key` is released, so a
+        retry with the same key executes the operation again.
       content:
         application/json:
           schema:

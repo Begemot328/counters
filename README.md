@@ -12,8 +12,8 @@ Kotlin 2.0, Ktor 3, kotlinx.serialization, JetBrains Exposed, PostgreSQL 16, Liq
 Нужен PostgreSQL. Если своего нет — в репозитории лежит `docker-compose.yml`:
 
 ```bash
-docker compose up -d      # PostgreSQL 16 на localhost:5432, postgres/root
-./gradlew run             # https://localhost:8443
+docker compose up -d --wait   # PostgreSQL 16 на localhost:5432, postgres/root; --wait дожидается готовности
+./gradlew run                 # https://localhost:8443
 ```
 
 При первом запуске приложение создаст схему `counters` и накатит миграции. Сервис слушает только
